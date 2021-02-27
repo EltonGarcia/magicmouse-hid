@@ -423,8 +423,8 @@ static void magicmouse_emit_touch(struct magicmouse_sc *msc, int raw_id,
 				msc->touches[id].scroll_y -= step_y;
 					// (64 - scroll_speed) * msc->scroll_accel;
 				msc->scroll_jiffies = now;
-				// input_report_rel(input, REL_WHEEL, step_y);
 				input_report_rel(input, REL_WHEEL_HI_RES, step_y * 120 / 3);
+				input_report_rel(input, REL_WHEEL, step_y / 3);
 
 				if (scroll_y_velocity == 0) 
 					scroll_y_velocity = step_y;
