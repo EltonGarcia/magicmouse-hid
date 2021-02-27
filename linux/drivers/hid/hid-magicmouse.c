@@ -22,6 +22,7 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/usb/input.h>
+#include <linux/timer.h>
 
 #include "hid-ids.h"
 
@@ -138,6 +139,13 @@ MODULE_PARM_DESC(report_undeciphered, "Report undeciphered multi-touch state fie
 	((TRACKPAD2_MAX_Y - TRACKPAD2_MIN_Y) / (TRACKPAD2_DIMENSION_Y / 100))
 
 #define MAX_TOUCHES		16
+
+struct timer_list scroll_timer;
+short scroll_y_velocity = 0;
+bool is_scroll_active = false;
+uint timer_delay = HZ/5;
+struct magicmouse_sc *current_msc = NULL;
+bool continue_loop = true;
 
 /**
  * struct magicmouse_sc - Tracks Magic Mouse-specific data.
@@ -261,6 +269,32 @@ static void magicmouse_emit_buttons(struct magicmouse_sc *msc, int state)
 		msc->scroll_accel = SCROLL_ACCEL_DEFAULT;
 }
 
+static void scroll_timer_func(struct timer_list *ptr)
+{
+	if (!continue_loop) return;
+
+	// if(!is_scroll_active) {
+		if (scroll_y_velocity > -1 && scroll_y_velocity < 1) {
+			scroll_y_velocity = 0;
+		} else {
+			if (scroll_y_velocity < 0) {
+				scroll_y_velocity += 1;
+			} else {
+				scroll_y_velocity -= 1;
+			}
+		}
+
+		if (current_msc != NULL && scroll_y_velocity != 0) {
+			current_msc->scroll_jiffies = jiffies;
+			input_report_rel(current_msc->input, REL_WHEEL, scroll_y_velocity);
+
+			input_sync(current_msc->input);
+		}
+	// }
+
+	mod_timer(&scroll_timer, jiffies + timer_delay);
+}
+
 static void magicmouse_emit_touch(struct magicmouse_sc *msc, int raw_id,
 		u8 *tdata, int npoints)
 {
@@ -356,6 +390,10 @@ static void magicmouse_emit_touch(struct magicmouse_sc *msc, int raw_id,
 			else
 				msc->scroll_accel = SCROLL_ACCEL_DEFAULT;
 
+			
+			scroll_y_velocity = 0;
+			is_scroll_active = true;
+
 			break;
 		case TOUCH_STATE_DRAG:
 			/* Add a position delay since the drag start in which
@@ -382,11 +420,20 @@ static void magicmouse_emit_touch(struct magicmouse_sc *msc, int raw_id,
 			}
 
 			if (step_y != 0) {
-				msc->touches[id].scroll_y -= step_y *
-					(64 - scroll_speed) * msc->scroll_accel;
+				msc->touches[id].scroll_y -= step_y;
+					// (64 - scroll_speed) * msc->scroll_accel;
 				msc->scroll_jiffies = now;
-				input_report_rel(input, REL_WHEEL, step_y);
+				// input_report_rel(input, REL_WHEEL, step_y);
+				input_report_rel(input, REL_WHEEL_HI_RES, step_y * 120 / 3);
+
+				if (scroll_y_velocity == 0) 
+					scroll_y_velocity = step_y;
+				else 
+					scroll_y_velocity = (scroll_y_velocity / 2) + (step_y / 2);
 			}
+
+			is_scroll_active = true;
+
 			break;
 		}
 	}
@@ -426,6 +473,9 @@ static int magicmouse_raw_event(struct hid_device *hdev,
 	struct magicmouse_sc *msc = hid_get_drvdata(hdev);
 	struct input_dev *input = msc->input;
 	int x = 0, y = 0, ii, clicks = 0, npoints;
+
+	current_msc = msc;
+	is_scroll_active = false;
 
 	switch (data[0]) {
 	case TRACKPAD_REPORT_ID:
@@ -589,7 +639,9 @@ static int magicmouse_setup_input(struct input_dev *input, struct hid_device *hd
 		__set_bit(REL_Y, input->relbit);
 		if (emulate_scroll_wheel) {
 			__set_bit(REL_WHEEL, input->relbit);
+			__set_bit(REL_WHEEL_HI_RES, input->relbit);
 			__set_bit(REL_HWHEEL, input->relbit);
+			__set_bit(REL_HWHEEL_HI_RES, input->relbit);
 		}
 	} else if (input->id.product == USB_DEVICE_ID_APPLE_MAGICTRACKPAD){
 		/* input->keybit is initialized with incorrect button info
@@ -714,6 +766,8 @@ static int magicmouse_input_mapping(struct hid_device *hdev,
 
 	if (!msc->input)
 		msc->input = hi->input;
+
+	hid_map_usage(hi, usage, bit, max, EV_REL, REL_WHEEL_HI_RES);
 
 	/* Magic Trackpad does not give relative data after switching to MT */
 	if ((hi->input->id.product == USB_DEVICE_ID_APPLE_MAGICTRACKPAD ||
@@ -860,10 +914,20 @@ static int magicmouse_probe(struct hid_device *hdev,
 		goto err_stop_hw;
 	}
 
+	// continue_loop = true;
+	continue_loop = false;
+	timer_setup(&scroll_timer, scroll_timer_func, 0);
+	mod_timer(&scroll_timer, jiffies + timer_delay);
+
 	return 0;
 err_stop_hw:
 	hid_hw_stop(hdev);
 	return ret;
+}
+
+void magicmouse_remove(struct hid_device *dev) {
+	continue_loop = false;
+	del_timer_sync(&scroll_timer);
 }
 
 static const struct hid_device_id magic_mice[] = {
@@ -888,6 +952,7 @@ static struct hid_driver magicmouse_driver = {
 	.raw_event = magicmouse_raw_event,
 	.input_mapping = magicmouse_input_mapping,
 	.input_configured = magicmouse_input_configured,
+	.remove = magicmouse_remove,
 };
 module_hid_driver(magicmouse_driver);
 
